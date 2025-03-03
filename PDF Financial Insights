@@ -1,0 +1,143 @@
+import fitz  # PyMuPDF for PDF text extraction
+import google.generativeai as genai
+import os
+import time
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Suppress unnecessary logs
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+# Configure Gemini API using REST (avoiding gRPC)
+GEMINI_API_KEY = ""  # Replace with your valid API key
+genai.configure(api_key=GEMINI_API_KEY, transport="rest")
+
+# Initialize Gemini Model
+try:
+    model = genai.GenerativeModel("gemini-1.5-pro")  # Use a stable model
+except Exception as e:
+    print(f"Error initializing model: {e}")
+    exit(1)
+
+
+def extract_text_from_pdf(pdf_path):
+    """Extracts text from any given PDF file."""
+    try:
+        doc = fitz.open(pdf_path)
+        text = ""
+        for page in doc:
+            text += page.get_text("text") + "\n"
+        return text.strip()
+    except Exception as e:
+        print(f"Error extracting text from PDF: {e}")
+        return ""
+
+
+def summarize_financial_report(text):
+    """Uses Gemini API to summarize financial insights from any PDF."""
+    prompt = f"""
+    Analyze the given financial report and extract the following data:
+    - Revenue growth (%) if available
+    - Net profit or earnings (in million)
+    - Total debt (in million) if mentioned
+    - Cash flow (in million) if present
+    - Major financial performance insights
+
+    Report Text:
+    {text[:8000]}  # Truncated to fit token limits
+
+    Provide a structured response with numbers clearly mentioned.
+    """
+
+    for attempt in range(3):  # Retry mechanism
+        try:
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Attempt {attempt + 1}: Error generating summary: {e}")
+            time.sleep(2)
+
+    return "Summary could not be generated."
+
+
+def safe_float(value):
+    """Converts a string to float safely, returns None if conversion fails."""
+    try:
+        return float(value) if value and value.replace('.', '', 1).isdigit() else None
+    except ValueError:
+        return None
+
+
+def extract_numerical_data(summary_text):
+    """Extracts financial numbers from Gemini's response using regex."""
+    revenue_growth = re.findall(r"Revenue growth.*?([\d.]+)%", summary_text, re.IGNORECASE)
+    net_profit = re.findall(r"Net Profit.*?([\d,]+)", summary_text, re.IGNORECASE)
+    debt_levels = re.findall(r"Debt.*?([\d,]+)", summary_text, re.IGNORECASE)
+    cash_flow = re.findall(r"Cash flow.*?([\d,]+)", summary_text, re.IGNORECASE)
+
+    return {
+        "Revenue Growth (%)": safe_float(revenue_growth[0]) if revenue_growth else None,
+        "Net Profit (Million)": safe_float(net_profit[0].replace(",", "")) if net_profit else None,
+        "Debt (Million)": safe_float(debt_levels[0].replace(",", "")) if debt_levels else None,
+        "Cash Flow (Million)": safe_float(cash_flow[0].replace(",", "")) if cash_flow else None
+    }
+
+
+def plot_financial_data(data, pdf_name):
+    """Generates a bar chart from extracted financial data."""
+    df = pd.DataFrame(data, index=["Company Data"])
+
+    df.plot(kind="bar", figsize=(8, 5), color=["blue", "green", "red", "purple"])
+
+    plt.title(f"Financial Summary - {pdf_name}")
+    plt.ylabel("Value")
+    plt.xticks(rotation=0)
+    plt.legend(loc="upper right")
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+
+    graph_path = f"{pdf_name}_financial_summary.png"
+    plt.savefig(graph_path)  # Save as image
+    plt.show()  # Display graph
+
+    return graph_path
+
+
+def save_summary(summary_text, pdf_name):
+    """Saves the extracted financial summary to a text file."""
+    summary_path = f"{pdf_name}_financial_summary.txt"
+    with open(summary_path, "w", encoding="utf-8") as file:
+        file.write(summary_text)
+    return summary_path
+
+
+if __name__ == "__main__":
+    pdf_path = "SJS Transcript Call.pdf"  # Replace with any financial PDF
+
+    # Extract text from PDF
+    pdf_text = extract_text_from_pdf(pdf_path)
+
+    if pdf_text:
+        print("\nExtracted Text Preview:\n", pdf_text[:500])
+
+        # Generate financial summary
+        summary = summarize_financial_report(pdf_text)
+        print("\n📌 Key Financial Insights:\n", summary)
+
+        # Save summary
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        summary_file = save_summary(summary, pdf_name)
+        print(f"📄 Summary saved at: {summary_file}")
+
+        # Extract numerical data and plot it
+        financial_data = extract_numerical_data(summary)
+        if any(financial_data.values()):  # Check if we got any valid numbers
+            print("\n📊 Extracted Financial Data:", financial_data)
+            graph_file = plot_financial_data(financial_data, pdf_name)
+            print(f"📈 Graph saved at: {graph_file}")
+        else:
+            print("⚠️ No numerical data found in the report.")
+    else:
+        print("No text extracted from the PDF.")
